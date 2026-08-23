@@ -1,205 +1,304 @@
+import html
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_groq import ChatGroq
 from langchain import hub
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.vectorstores import FAISS
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-DB_FAISS_PATH = "vectorstore/db_faiss"
-GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile"]
+DB_FAISS_PATH = Path("vectorstore/db_faiss")
+GROQ_MODELS = [
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
+]
 
-# ---------------------------------------------------------------------------
-# Page config
-# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Consult — Medical Reference Assistant",
-    page_icon="\U0001FA7A",
+    page_title="MediGuide RAG Assistant",
+    page_icon="+",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# Design tokens — clinical chart / lab-note identity
-#   Background: pale mint paper, not the generic AI-cream
-#   Accent:     deep teal (trust, clinical) + muted amber (used sparingly,
-#               for the "you" side of the conversation only)
-#   Type:       Source Serif 4 for headers (journal feel), IBM Plex Sans for
-#               body, IBM Plex Mono for citations / stats (lab readout feel)
-# ---------------------------------------------------------------------------
 CSS = """
-<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
-    --paper: #EEF4F1;
-    --card: #FFFFFF;
-    --ink: #1C2B29;
-    --ink-soft: #4B5F5B;
-    --teal: #1F6F64;
-    --teal-dark: #14504A;
-    --amber: #C98A3E;
-    --border: #D6E3DE;
-    --danger: #B84C4C;
+    --bg: #f4f7f6;
+    --panel: #ffffff;
+    --panel-soft: #eef6f4;
+    --ink: #172321;
+    --muted: #5d706c;
+    --teal: #176b5d;
+    --teal-dark: #0f4c43;
+    --amber: #b7772f;
+    --red: #a84848;
+    --border: #d9e6e2;
+    --shadow: 0 14px 34px rgba(17, 48, 43, 0.08);
 }
 
 html, body, [data-testid="stAppViewContainer"] {
-    background-color: var(--paper) !important;
-    font-family: 'IBM Plex Sans', sans-serif;
+    background: var(--bg);
     color: var(--ink);
 }
 
-[data-testid="stHeader"] { background: transparent; }
+[data-testid="stHeader"] {
+    background: transparent;
+}
 
-/* ---- Sidebar: styled like a patient chart clipboard ---- */
+.block-container {
+    padding-top: 1.4rem;
+    max-width: 1180px;
+}
+
 [data-testid="stSidebar"] {
-    background-color: var(--teal-dark) !important;
-    border-right: 1px solid var(--border);
-}
-[data-testid="stSidebar"] * { color: #EAF3F0 !important; }
-[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-    font-family: 'Source Serif 4', serif;
-}
-[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.15); }
-
-.stat-chip {
-    background: rgba(255,255,255,0.08);
-    border: 1px solid rgba(255,255,255,0.18);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 8px;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.stat-chip .label {
-    font-size: 0.72rem;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    opacity: 0.75;
-}
-.stat-chip .value {
-    font-size: 1.25rem;
-    font-weight: 500;
-    color: #7FDCC9 !important;
+    background: #123f39;
+    border-right: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-/* ---- Header ---- */
-.consult-header {
-    font-family: 'Source Serif 4', serif;
-    font-weight: 700;
-    font-size: 2.1rem;
-    color: var(--ink);
-    margin-bottom: 0;
-    display: flex;
+[data-testid="stSidebar"] * {
+    color: #edf8f5 !important;
+}
+
+[data-testid="stSidebar"] .stSelectbox div,
+[data-testid="stSidebar"] .stSlider div,
+[data-testid="stSidebar"] .stCheckbox div {
+    color: #edf8f5 !important;
+}
+
+.hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 18px;
     align-items: center;
-    gap: 12px;
+    padding: 24px 28px;
+    background:
+        linear-gradient(135deg, rgba(23, 107, 93, 0.10), rgba(183, 119, 47, 0.06)),
+        var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    margin-bottom: 20px;
 }
-.consult-sub {
-    color: var(--ink-soft);
-    font-size: 0.95rem;
-    margin-top: 2px;
+
+.hero h1 {
+    margin: 0;
+    font-size: 2.15rem;
+    line-height: 1.12;
+    letter-spacing: 0;
+}
+
+.hero p {
+    color: var(--muted);
+    margin: 8px 0 0;
+    max-width: 760px;
+    font-size: 1rem;
+}
+
+.brand-kicker {
+    color: var(--teal);
+    font-size: 0.78rem;
+    font-weight: 750;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     margin-bottom: 6px;
 }
 
-/* pulse divider — the signature element */
-.pulse-line {
-    width: 100%;
-    height: 22px;
-    margin: 6px 0 22px 0;
-    background-image: repeating-linear-gradient(
-        to right,
-        var(--border) 0px, var(--border) 2px, transparent 2px, transparent 8px
-    );
-    background-position: center;
-    background-size: 100% 1px;
-    background-repeat: no-repeat;
-    position: relative;
-}
-.pulse-line::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 50%;
-    width: 100%; height: 2px;
-    background: var(--teal);
-    clip-path: polygon(
-        0% 50%, 38% 50%, 42% 10%, 46% 90%, 50% 50%, 100% 50%, 100% 52%, 0% 52%
-    );
-    opacity: 0.55;
+.status-stack {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+    gap: 10px;
+    min-width: 280px;
 }
 
-/* ---- Chat bubbles ---- */
-[data-testid="stChatMessage"] {
-    background: transparent;
-    padding: 4px 0;
-}
-[data-testid="stChatMessageContent"] {
-    background: var(--card);
+.metric {
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 16px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.78);
+    padding: 12px 14px;
 }
 
-/* Quick-question chips */
-.stButton>button {
-    background: var(--card);
+.metric-label {
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.metric-value {
+    margin-top: 4px;
+    color: var(--ink);
+    font-size: 1.18rem;
+    font-weight: 700;
+}
+
+.notice {
+    border: 1px solid #e3c790;
+    border-left: 4px solid var(--amber);
+    border-radius: 8px;
+    background: #fff8ec;
+    color: #684817;
+    padding: 12px 14px;
+    margin-bottom: 18px;
+    font-size: 0.92rem;
+}
+
+.setup-error {
+    border: 1px solid #e4bbbb;
+    border-left: 4px solid var(--red);
+    border-radius: 8px;
+    background: #fff5f5;
+    color: #6d2626;
+    padding: 12px 14px;
+    margin-bottom: 18px;
+    font-size: 0.92rem;
+}
+
+.quick-title {
+    margin: 0 0 10px;
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.source-chip {
     border: 1px solid var(--border);
+    border-left: 4px solid var(--teal);
+    border-radius: 8px;
+    background: #f8fbfa;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+}
+
+.source-meta {
     color: var(--teal-dark);
-    border-radius: 20px;
-    font-size: 0.85rem;
-    padding: 4px 14px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 5px;
 }
-.stButton>button:hover {
+
+.source-preview {
+    color: var(--muted);
+    font-size: 0.9rem;
+    line-height: 1.45;
+}
+
+.sidebar-title {
+    font-size: 1.35rem;
+    font-weight: 800;
+    margin-bottom: 3px;
+}
+
+.sidebar-subtitle {
+    color: rgba(237, 248, 245, 0.72) !important;
+    font-size: 0.86rem;
+    margin-bottom: 18px;
+}
+
+.sidebar-panel {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.07);
+    padding: 12px;
+    margin-bottom: 12px;
+}
+
+.sidebar-panel .label {
+    color: rgba(237, 248, 245, 0.70) !important;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.sidebar-panel .value {
+    color: #ffffff !important;
+    font-size: 1.25rem;
+    font-weight: 800;
+    margin-top: 2px;
+}
+
+.stButton > button {
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #ffffff;
+    color: var(--teal-dark);
+    font-weight: 650;
+    min-height: 2.6rem;
+}
+
+.stButton > button:hover {
     border-color: var(--teal);
     color: var(--teal);
 }
 
-/* Source citation chip */
-.source-chip {
-    border-left: 3px solid var(--teal);
-    background: #F5FAF8;
-    border-radius: 4px;
-    padding: 8px 12px;
-    margin-bottom: 8px;
-    font-size: 0.85rem;
-}
-.source-chip .src-meta {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem;
-    color: var(--teal-dark);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 3px;
+[data-testid="stChatMessage"] {
+    background: transparent;
+    padding: 0.35rem 0;
 }
 
-.disclaimer-banner {
-    background: #FBF0E4;
-    border: 1px solid #E8CDA0;
-    color: #6B4A1E;
+[data-testid="stChatMessageContent"] {
+    border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 0.82rem;
-    margin-bottom: 18px;
+    background: #ffffff;
+    padding: 0.9rem 1rem;
+}
+
+@media (max-width: 860px) {
+    .hero {
+        grid-template-columns: 1fr;
+        padding: 20px;
+    }
+
+    .status-stack {
+        grid-template-columns: 1fr;
+        min-width: 0;
+    }
+
+    .hero h1 {
+        font-size: 1.65rem;
+    }
 }
 </style>
 """
-# Markdown treats 4+ space indented lines as code blocks, which breaks
-# <style> injection. Strip leading whitespace from every line so the CSS
-# renders as actual styling instead of literal text.
-_css_flat = "\n".join(line.lstrip() for line in CSS.split("\n"))
-st.markdown(_css_flat, unsafe_allow_html=True)
+st.markdown(CSS, unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# Cached resources
-# ---------------------------------------------------------------------------
+
+def init_state():
+    defaults = {
+        "messages": [],
+        "session_start": datetime.now(),
+        "pending_prompt": None,
+        "response_times": [],
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
 @st.cache_resource(show_spinner=False)
 def get_vectorstore():
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    return FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
+    embedding_model = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+    return FAISS.load_local(
+        str(DB_FAISS_PATH),
+        embedding_model,
+        allow_dangerous_deserialization=True,
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -209,7 +308,20 @@ def get_base_prompt():
 
 def build_chain(model_name: str, temperature: float, k: int):
     api_key = os.environ.get("GROQ_API_KEY")
-    llm = ChatGroq(model=model_name, temperature=temperature, max_tokens=768, api_key=api_key)
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is missing. Add it to your .env file.")
+
+    if not DB_FAISS_PATH.exists():
+        raise RuntimeError(
+            "FAISS vectorstore is missing. Run: python create_memory_for_llm.py"
+        )
+
+    llm = ChatGroq(
+        model=model_name,
+        temperature=temperature,
+        max_tokens=768,
+        api_key=api_key,
+    )
     vectorstore = get_vectorstore()
     prompt = get_base_prompt()
     combine_docs_chain = create_stuff_documents_chain(llm, prompt)
@@ -217,132 +329,195 @@ def build_chain(model_name: str, temperature: float, k: int):
     return create_retrieval_chain(retriever, combine_docs_chain)
 
 
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "session_start" not in st.session_state:
-    st.session_state.session_start = datetime.now()
-if "pending_prompt" not in st.session_state:
-    st.session_state.pending_prompt = None
-if "response_times" not in st.session_state:
-    st.session_state.response_times = []
+def source_cards(docs):
+    cards = []
+    for doc in docs:
+        page = doc.metadata.get("page", "?")
+        source_name = Path(doc.metadata.get("source", "unknown")).name
+        preview = doc.page_content[:260].strip().replace("\n", " ")
+        cards.append(
+            {
+                "meta": f"{source_name} | page {page}",
+                "preview": preview + ("..." if len(doc.page_content) > 260 else ""),
+            }
+        )
+    return cards
 
-# ---------------------------------------------------------------------------
-# Sidebar — the "chart"
-# ---------------------------------------------------------------------------
+
+def render_source_card(source):
+    meta = html.escape(source["meta"])
+    preview = html.escape(source["preview"])
+    st.markdown(
+        f"""
+        <div class="source-chip">
+            <div class="source-meta">{meta}</div>
+            <div class="source-preview">{preview}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+init_state()
+
+message_count = len(st.session_state.messages)
+avg_time = (
+    sum(st.session_state.response_times) / len(st.session_state.response_times)
+    if st.session_state.response_times
+    else 0
+)
+vector_status = "Ready" if DB_FAISS_PATH.exists() else "Missing"
+api_status = "Connected" if os.environ.get("GROQ_API_KEY") else "Missing"
+
 with st.sidebar:
-    st.markdown("### \U0001F4CB Session Chart")
+    st.markdown(
+        """
+        <div class="sidebar-title">MediGuide</div>
+        <div class="sidebar-subtitle">Document-grounded medical assistant</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="sidebar-panel">
+            <div class="label">Messages</div>
+            <div class="value">{message_count}</div>
+        </div>
+        <div class="sidebar-panel">
+            <div class="label">Avg response</div>
+            <div class="value">{avg_time:.1f}s</div>
+        </div>
+        <div class="sidebar-panel">
+            <div class="label">Session started</div>
+            <div class="value">{st.session_state.session_start.strftime("%H:%M")}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    st.markdown(
-        f'<div class="stat-chip"><div class="label">Messages</div>'
-        f'<div class="value">{len(st.session_state.messages)}</div></div>',
-        unsafe_allow_html=True,
-    )
-    avg_time = (
-        sum(st.session_state.response_times) / len(st.session_state.response_times)
-        if st.session_state.response_times else 0
-    )
-    st.markdown(
-        f'<div class="stat-chip"><div class="label">Avg. response</div>'
-        f'<div class="value">{avg_time:.1f}s</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="stat-chip"><div class="label">Session started</div>'
-        f'<div class="value" style="font-size:0.95rem;">'
-        f'{st.session_state.session_start.strftime("%H:%M:%S")}</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("---")
-    st.markdown("### \u2699\uFE0F Retrieval Settings")
+    st.divider()
+    st.subheader("Retrieval")
     model_choice = st.selectbox("Model", GROQ_MODELS, index=0)
-    temperature = st.slider("Temperature", 0.0, 1.0, 0.5, 0.05,
-                             help="Lower = more literal/consistent. Higher = more exploratory.")
-    k_sources = st.slider("Sources retrieved (k)", 1, 8, 3,
-                           help="How many document chunks are pulled in to ground each answer.")
-    show_sources = st.checkbox("Show source citations", value=True)
+    temperature = st.slider(
+        "Temperature",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.35,
+        step=0.05,
+        help="Lower values keep responses more literal and consistent.",
+    )
+    k_sources = st.slider(
+        "Sources",
+        min_value=1,
+        max_value=8,
+        value=4,
+        help="Number of document chunks retrieved for each answer.",
+    )
+    show_sources = st.toggle("Show citations", value=True)
 
-    st.markdown("---")
-    if st.button("\U0001F5D1\uFE0F Clear conversation", use_container_width=True):
+    st.divider()
+    if st.button("Clear chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.response_times = []
         st.rerun()
 
     if st.session_state.messages:
         transcript = "\n\n".join(
-            f"{m['role'].upper()}: {m['content']}" for m in st.session_state.messages
+            f"{message['role'].upper()}: {message['content']}"
+            for message in st.session_state.messages
         )
         st.download_button(
-            "\u2B07\uFE0F Download transcript",
+            "Download transcript",
             transcript,
-            file_name="consult_transcript.txt",
+            file_name="medical_chat_transcript.txt",
             use_container_width=True,
         )
 
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-st.markdown('<div class="consult-header">\U0001FA7A Consult</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="consult-sub">Answers grounded in your indexed reference documents — every claim is traceable to a source.</div>',
+    f"""
+    <section class="hero">
+        <div>
+            <div class="brand-kicker">RAG Medical Chatbot</div>
+            <h1>MediGuide Clinical Reference Assistant</h1>
+            <p>Ask questions against your indexed medical PDFs and review source-backed responses from the local FAISS knowledge base.</p>
+        </div>
+        <div class="status-stack">
+            <div class="metric">
+                <div class="metric-label">Vector DB</div>
+                <div class="metric-value">{vector_status}</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Groq API</div>
+                <div class="metric-value">{api_status}</div>
+            </div>
+        </div>
+    </section>
+    """,
     unsafe_allow_html=True,
 )
-st.markdown('<div class="pulse-line"></div>', unsafe_allow_html=True)
 
 st.markdown(
-    '<div class="disclaimer-banner">\u26A0\uFE0F This tool retrieves from a fixed document set '
-    'and does not replace professional medical advice. Always verify against current clinical guidance.</div>',
+    """
+    <div class="notice">
+        This assistant retrieves from a fixed document set and is not a substitute
+        for professional medical advice, diagnosis, or treatment.
+    </div>
+    """,
     unsafe_allow_html=True,
 )
 
-# ---------------------------------------------------------------------------
-# Quick-start chips (only shown before first message)
-# ---------------------------------------------------------------------------
+if not os.environ.get("GROQ_API_KEY"):
+    st.markdown(
+        """
+        <div class="setup-error">
+            GROQ_API_KEY is not configured. Add GROQ_API_KEY=your_key_here to a .env file before asking questions.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+if not DB_FAISS_PATH.exists():
+    st.markdown(
+        """
+        <div class="setup-error">
+            The FAISS vector database was not found. Run python create_memory_for_llm.py after placing PDFs in the data folder.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 if not st.session_state.messages:
-    st.markdown("**Try asking:**")
-    cols = st.columns(3)
-    sample_questions = [
-        "What are the symptoms described for this condition?",
-        "What treatment options are mentioned?",
-        "Are there any noted risk factors?",
+    st.markdown('<p class="quick-title">Quick prompts</p>', unsafe_allow_html=True)
+    quick_prompts = [
+        "Summarize the key symptoms for diabetes.",
+        "What treatments are mentioned for hypertension?",
+        "List common risk factors for asthma.",
     ]
-    for col, q in zip(cols, sample_questions):
+    cols = st.columns(3)
+    for col, question in zip(cols, quick_prompts):
         with col:
-            if st.button(q, use_container_width=True):
-                st.session_state.pending_prompt = q
+            if st.button(question, use_container_width=True):
+                st.session_state.pending_prompt = question
                 st.rerun()
 
-# ---------------------------------------------------------------------------
-# Render chat history
-# ---------------------------------------------------------------------------
 for message in st.session_state.messages:
-    avatar = "\U0001F9D1" if message["role"] == "user" else "\U0001FA7A"
-    with st.chat_message(message["role"], avatar=avatar):
+    with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if message["role"] == "assistant" and message.get("sources") and show_sources:
-            with st.expander(f"\U0001F4C4 {len(message['sources'])} source(s) cited"):
-                for src in message["sources"]:
-                    st.markdown(
-                        f'<div class="source-chip"><div class="src-meta">{src["meta"]}</div>{src["preview"]}</div>',
-                        unsafe_allow_html=True,
-                    )
+            with st.expander(f"{len(message['sources'])} source(s) used"):
+                for source in message["sources"]:
+                    render_source_card(source)
 
-# ---------------------------------------------------------------------------
-# Input — either typed or a clicked quick-start chip
-# ---------------------------------------------------------------------------
-typed_prompt = st.chat_input("Ask about your indexed documents...")
+typed_prompt = st.chat_input("Ask about your indexed medical documents...")
 prompt = st.session_state.pending_prompt or typed_prompt
 st.session_state.pending_prompt = None
 
 if prompt:
-    st.chat_message("user", avatar="\U0001F9D1").markdown(prompt)
+    st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    with st.chat_message("assistant", avatar="\U0001FA7A"):
-        with st.spinner("Reviewing indexed literature..."):
+    with st.chat_message("assistant"):
+        with st.spinner("Searching references and preparing answer..."):
             try:
                 start = time.time()
                 chain = build_chain(model_choice, temperature, k_sources)
@@ -351,37 +526,29 @@ if prompt:
                 st.session_state.response_times.append(elapsed)
 
                 answer = response["answer"]
+                sources = source_cards(response.get("context", []))
+
                 st.markdown(answer)
-
-                sources = []
-                for doc in response.get("context", []):
-                    page = doc.metadata.get("page", "?")
-                    src_name = doc.metadata.get("source", "unknown").split("/")[-1].split("\\")[-1]
-                    sources.append({
-                        "meta": f"{src_name} · page {page}",
-                        "preview": doc.page_content[:220].strip() + "...",
-                    })
-
                 if sources and show_sources:
-                    with st.expander(f"\U0001F4C4 {len(sources)} source(s) cited"):
-                        for src in sources:
-                            st.markdown(
-                                f'<div class="source-chip"><div class="src-meta">{src["meta"]}</div>{src["preview"]}</div>',
-                                unsafe_allow_html=True,
-                            )
-
+                    with st.expander(f"{len(sources)} source(s) used"):
+                        for source in sources:
+                            render_source_card(source)
                 st.caption(f"Responded in {elapsed:.1f}s using {model_choice}")
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "sources": sources,
-                })
-
-            except Exception as e:
-                st.error(f"Something went wrong retrieving an answer: {e}")
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": f"⚠️ Error: {e}",
-                    "sources": [],
-                })
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": sources,
+                    }
+                )
+            except Exception as exc:
+                error_text = f"Error: {exc}"
+                st.error(error_text)
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": error_text,
+                        "sources": [],
+                    }
+                )
